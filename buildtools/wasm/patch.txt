@@ -1,0 +1,352 @@
+diff --git a/src/cache.rs b/src/cache.rs
+index 03013dac..236c0554 100644
+--- a/src/cache.rs
++++ b/src/cache.rs
+@@ -28,7 +28,11 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+ /// because `CacheEntry.timestamp` differs per write.
+ fn atomic_write(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
+     let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
++    #[cfg(not(target_arch = "wasm32"))]
+     let tmp_path = target.with_extension(format!("tmp.{}.{counter}", std::process::id()));
++    // pid not available on WASI
++    #[cfg(target_arch = "wasm32")]
++    let tmp_path = target.with_extension(format!("tmp.{counter}"));
+     match fs::write(&tmp_path, bytes).and_then(|()| fs::rename(&tmp_path, target)) {
+         Ok(()) => Ok(()),
+         Err(e) => {
+diff --git a/src/code_block_tools/executor.rs b/src/code_block_tools/executor.rs
+index 4414d3a1..cdbbd78d 100644
+--- a/src/code_block_tools/executor.rs
++++ b/src/code_block_tools/executor.rs
+@@ -5,12 +5,77 @@
+ 
+ use super::config::ToolDefinition;
+ use std::collections::HashMap;
++use std::sync::{Arc, Mutex};
++#[cfg(not(target_os = "wasi"))]
+ use std::io::{Read, Write};
++#[cfg(not(target_os = "wasi"))]
+ use std::process::{Command, Stdio};
+-use std::sync::{Arc, Mutex};
++#[cfg(not(target_os = "wasi"))]
+ use std::thread;
++#[cfg(not(target_os = "wasi"))]
+ use std::time::{Duration, Instant};
+ 
++// Because WASI does not include process spawning, we define a custom ABI for it.
++#[cfg(target_os = "wasi")]
++mod host {
++    #[link(wasm_import_module = "rumdl")]
++    unsafe extern "C" {
++        /// Returns non-zero if a tool with the given name is available.
++        pub fn check_tool_exists(name_ptr: *const u8, name_len: usize) -> i32;
++
++        /// Executes a tool, passing `args` (each framed as a u32 LE length
++        /// followed by that many bytes) and `stdin`.
++        ///
++        /// The host writes the captured stdout/stderr into guest memory it
++        /// allocates via [`rumdl_wasm_alloc`], storing the pointer and length
++        /// at the provided out-params. Returns the tool's exit code.
++        #[allow(clippy::too_many_arguments)]
++        pub fn execute_tool(
++            name_ptr: *const u8,
++            name_len: usize,
++            args_ptr: *const u8,
++            args_len: usize,
++            stdin_ptr: *const u8,
++            stdin_len: usize,
++            timeout_ms: u64,
++            out_stdout_ptr: *mut usize,
++            out_stdout_len: *mut usize,
++            out_stderr_ptr: *mut usize,
++            out_stderr_len: *mut usize,
++        ) -> i32;
++    }
++}
++
++/// Allocates `len` bytes in guest linear memory for the host to fill.
++///
++/// Called by the WASI host (not from Rust) to return tool output. The matching
++/// free happens in the guest in [`read_host_string`] after the bytes have been copied out.
++#[cfg(target_os = "wasi")]
++#[unsafe(no_mangle)]
++pub extern "C" fn rumdl_wasm_alloc(len: usize) -> *mut u8 {
++    if len == 0 {
++        return std::ptr::NonNull::<u8>::dangling().as_ptr();
++    }
++    // SAFETY: len > 0, align 1 is always valid for u8.
++    unsafe { std::alloc::alloc(std::alloc::Layout::from_size_align_unchecked(len, 1)) }
++}
++
++/// Copies a host-allocated `[ptr, len)` byte range into an owned String and
++/// frees the allocation made by [`rumdl_wasm_alloc`].
++#[cfg(target_os = "wasi")]
++fn read_host_string(ptr: usize, len: usize) -> String {
++    if ptr == 0 || len == 0 {
++        return String::new();
++    }
++    // SAFETY: the host allocated [ptr, len) via rumdl_wasm_alloc (align 1).
++    unsafe {
++        let slice = std::slice::from_raw_parts(ptr as *const u8, len);
++        let s = String::from_utf8_lossy(slice).into_owned();
++        std::alloc::dealloc(ptr as *mut u8, std::alloc::Layout::from_size_align_unchecked(len, 1));
++        s
++    }
++}
++
+ /// Result of executing a tool.
+ #[derive(Debug, Clone)]
+ pub struct ToolOutput {
+@@ -121,15 +186,20 @@ impl ToolExecutor {
+                 .is_ok_and(|s| s.success())
+         }
+ 
+-        #[cfg(not(any(unix, windows)))]
++        #[cfg(target_os = "wasi")]
++        {
++            !tool_name.is_empty() && unsafe { host::check_tool_exists(tool_name.as_ptr(), tool_name.len()) != 0 }
++        }
++
++        #[cfg(not(any(unix, windows, target_os = "wasi")))]
+         {
+-            // WASM and other platforms: external tools not available
++            // Other WASM and platforms without process support: tools unavailable
+             let _ = tool_name;
+             false
+         }
+     }
+ 
+-    /// Execute a tool with the given input.
++    /// Execute a tool with the given input by spawning a child process.
+     ///
+     /// # Arguments
+     /// * `tool_def` - Tool definition with command and arguments
+@@ -139,6 +209,7 @@ impl ToolExecutor {
+     ///
+     /// # Returns
+     /// Tool output on success, or an error.
++    #[cfg(not(target_os = "wasi"))]
+     pub fn execute(
+         &self,
+         tool_def: &ToolDefinition,
+@@ -254,6 +325,87 @@ impl ToolExecutor {
+         })
+     }
+ 
++    /// Execute a tool with the given input by delegating to the WASI host.
++    ///
++    /// # Arguments
++    /// * `tool_def` - Tool definition with command and arguments
++    /// * `input` - Content to pass via stdin
++    /// * `is_format_mode` - Whether to use format_args (true) or lint_args (false)
++    /// * `timeout_ms` - Optional timeout override
++    ///
++    /// # Returns
++    /// Tool output on success, or an error.
++    #[cfg(target_os = "wasi")]
++    pub fn execute(
++        &self,
++        tool_def: &ToolDefinition,
++        input: &str,
++        is_format_mode: bool,
++        timeout_ms: Option<u64>,
++    ) -> Result<ToolOutput, ExecutorError> {
++        if tool_def.command.is_empty() {
++            return Err(ExecutorError::ExecutionFailed {
++                tool: "unknown".to_string(),
++                message: "Empty command".to_string(),
++            });
++        }
++
++        let tool_name = &tool_def.command[0];
++
++        // Check tool availability (lazy, cached)
++        if !self.is_tool_available(tool_name) {
++            return Err(ExecutorError::ToolNotFound {
++                tool: tool_name.clone(),
++            });
++        }
++
++        let extra_args = if is_format_mode {
++            &tool_def.format_args
++        } else {
++            &tool_def.lint_args
++        };
++        let stdin_input = if tool_def.stdin { input } else { "" };
++        let timeout_ms = timeout_ms.unwrap_or(self.default_timeout_ms);
++
++        // Serialize arguments length-prefixed (u32 LE length + bytes per arg)
++        // so that args containing any byte (including NUL) are unambiguous.
++        let mut args: Vec<u8> = Vec::new();
++        for arg in tool_def.command[1..].iter().chain(extra_args.iter()) {
++            args.extend_from_slice(&(arg.len() as u32).to_le_bytes());
++            args.extend_from_slice(arg.as_bytes());
++        }
++
++        let mut stdout_ptr: usize = 0;
++        let mut stdout_len: usize = 0;
++        let mut stderr_ptr: usize = 0;
++        let mut stderr_len: usize = 0;
++
++        // SAFETY: pointers/lengths reference live buffers for the call's
++        // duration; the host writes output pointers into the out-params.
++        let exit_code = unsafe {
++            host::execute_tool(
++                tool_name.as_ptr(),
++                tool_name.len(),
++                args.as_ptr(),
++                args.len(),
++                stdin_input.as_ptr(),
++                stdin_input.len(),
++                timeout_ms,
++                &mut stdout_ptr,
++                &mut stdout_len,
++                &mut stderr_ptr,
++                &mut stderr_len,
++            )
++        };
++
++        Ok(ToolOutput {
++            stdout: read_host_string(stdout_ptr, stdout_len),
++            stderr: read_host_string(stderr_ptr, stderr_len),
++            exit_code,
++            success: exit_code == 0,
++        })
++    }
++
+     /// Execute a tool for formatting (returns formatted content).
+     pub fn format(
+         &self,
+@@ -292,12 +444,14 @@ impl ToolExecutor {
+     }
+ }
+ 
++#[cfg(not(target_os = "wasi"))]
+ fn read_pipe_to_string<R: Read>(mut pipe: R) -> std::io::Result<String> {
+     let mut buf = Vec::new();
+     pipe.read_to_end(&mut buf)?;
+     Ok(String::from_utf8_lossy(&buf).to_string())
+ }
+ 
++#[cfg(not(target_os = "wasi"))]
+ fn join_reader(handle: Option<thread::JoinHandle<std::io::Result<String>>>) -> Result<String, String> {
+     match handle {
+         Some(handle) => match handle.join() {
+diff --git a/src/commands/mod.rs b/src/commands/mod.rs
+index 5f870bfe..2fe90264 100644
+--- a/src/commands/mod.rs
++++ b/src/commands/mod.rs
+@@ -13,6 +13,7 @@ pub mod import;
+ pub mod init;
+ pub mod rule;
+ pub mod schema;
++#[cfg(not(target_arch = "wasm32"))]
+ pub mod server;
+ pub mod version;
+ pub mod vscode;
+diff --git a/src/lib.rs b/src/lib.rs
+index fe3c4eb7..f05b928d 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -61,7 +61,7 @@ pub mod lint_context;
+ pub mod markdownlint_config;
+ pub mod profiling;
+ pub mod rule;
+-#[cfg(feature = "native")]
++#[cfg(feature = "colored")]
+ pub mod vscode;
+ pub mod workspace_index;
+ #[macro_use]
+@@ -75,7 +75,7 @@ pub mod utils;
+ // Native-only modules (require tokio, tower-lsp, etc.)
+ #[cfg(feature = "native")]
+ pub mod lsp;
+-#[cfg(feature = "native")]
++#[cfg(feature = "colored")]
+ pub mod output;
+ #[cfg(feature = "native")]
+ pub mod parallel;
+diff --git a/src/main.rs b/src/main.rs
+index 30a896bb..71e8b8eb 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -1,5 +1,5 @@
+ // Use jemalloc for better memory allocation performance on Unix-like systems
+-#[cfg(not(target_env = "msvc"))]
++#[cfg(all(not(target_env = "msvc"), not(target_arch = "wasm32")))]
+ #[global_allocator]
+ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+ 
+@@ -161,6 +161,7 @@ enum Commands {
+         output: Option<String>,
+     },
+     /// Start the Language Server Protocol server
++    #[cfg(not(target_arch = "wasm32"))]
+     Server {
+         /// TCP port to listen on (for debugging)
+         #[arg(long)]
+@@ -391,6 +392,7 @@ fn main() -> Result<(), Box<dyn Error>> {
+             Commands::CodeBlockToolsDocs { action } => {
+                 commands::code_block_tools_docs::handle_code_block_tools_docs(action);
+             }
++            #[cfg(not(target_arch = "wasm32"))]
+             Commands::Server { port, stdio, verbose } => {
+                 let config_path = if cli.no_config || cli.isolated {
+                     None
+diff --git a/src/workspace_index.rs b/src/workspace_index.rs
+index 09a1f873..7d279e9a 100644
+--- a/src/workspace_index.rs
++++ b/src/workspace_index.rs
+@@ -260,7 +260,7 @@ pub fn extract_cross_file_links(ctx: &LintContext) -> ExtractedCrossFileLinks {
+ }
+ 
+ /// Magic bytes identifying a workspace index cache file
+-#[cfg(feature = "native")]
++#[cfg(feature = "postcard")]
+ const CACHE_MAGIC: &[u8; 4] = b"RWSI";
+ 
+ /// Cache format version - increment when WorkspaceIndex serialization changes
+@@ -268,11 +268,11 @@ const CACHE_MAGIC: &[u8; 4] = b"RWSI";
+ /// no longer correct. Version 8 forces a rebuild so the new `root_relative_links`
+ /// field is populated; earlier caches lack it, leaving find-references unable to
+ /// discover root-relative (`/path`) links until a rescan.
+-#[cfg(feature = "native")]
++#[cfg(feature = "postcard")]
+ const CACHE_FORMAT_VERSION: u32 = 8;
+ 
+ /// Cache file name within the version directory
+-#[cfg(feature = "native")]
++#[cfg(feature = "postcard")]
+ const CACHE_FILE_NAME: &str = "workspace_index.bin";
+ 
+ /// Workspace-wide index for cross-file analysis
+@@ -565,7 +565,7 @@ impl WorkspaceIndex {
+     /// - Magic header for file type validation
+     /// - Format version for compatibility detection
+     /// - Atomic writes (temp file + rename) to prevent corruption
+-    #[cfg(feature = "native")]
++    #[cfg(feature = "postcard")]
+     pub fn save_to_cache(&self, cache_dir: &Path) -> std::io::Result<()> {
+         use std::fs;
+         use std::io::Write;
+@@ -585,7 +585,11 @@ impl WorkspaceIndex {
+ 
+         // Write atomically: write to temp file then rename
+         let final_path = cache_dir.join(CACHE_FILE_NAME);
++        #[cfg(not(target_arch = "wasm32"))]
+         let temp_path = cache_dir.join(format!("{}.tmp.{}", CACHE_FILE_NAME, std::process::id()));
++        // pid not available on WASI
++        #[cfg(target_arch = "wasm32")]
++        let temp_path = cache_dir.join(format!("{CACHE_FILE_NAME}.tmp"));
+ 
+         // Write to temp file
+         {
+@@ -614,7 +618,7 @@ impl WorkspaceIndex {
+     /// - Magic header doesn't match
+     /// - Format version is incompatible
+     /// - Data is corrupted
+-    #[cfg(feature = "native")]
++    #[cfg(feature = "postcard")]
+     pub fn load_from_cache(cache_dir: &Path) -> Option<Self> {
+         use std::fs;
+ 

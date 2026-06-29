@@ -1,0 +1,14 @@
+name: CI
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "*"
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    uses: wasilibs/actions/.github/workflows/ci.yaml@5bf268fde802fe591d6148e69a7ddb046384d657
+    secrets: inherit

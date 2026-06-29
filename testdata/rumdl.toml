@@ -1,0 +1,18 @@
+[code-block-tools]
+enabled = true
+
+[code-block-tools.languages.go]
+format = ["gofmt"]
+
+[code-block-tools.languages.goimports]
+format = ["goimports"]
+
+[code-block-tools.languages.shell]
+format = ["shfmt"]
+lint = ["shellcheck"]
+
+[code-block-tools.languages.yaml]
+format = ["yamlfmt"]
+
+[code-block-tools.languages.json]
+format = ["prettier:json"]

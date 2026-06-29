@@ -1,0 +1,16 @@
+name: "Release"
+
+on:
+  push:
+    tags:
+      - v*
+
+permissions:
+  id-token: write
+  attestations: write
+  contents: write
+
+jobs:
+  release:
+    uses: wasilibs/actions/.github/workflows/release.yaml@5bf268fde802fe591d6148e69a7ddb046384d657
+    secrets: inherit
