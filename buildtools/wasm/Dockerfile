@@ -11,7 +11,7 @@ WORKDIR /workspace
 RUN git apply /patch.txt
 
 # rumdl's release profile sets strip = true, which drops the wasm metadata
-RUN cargo update && CARGO_PROFILE_RELEASE_STRIP=false cargo build --release --target wasm32-wasip1-threads --no-default-features --features parallel,colored,blake3,postcard,chrono,env_logger,notify --bin rumdl
+RUN cargo update && CARGO_PROFILE_RELEASE_STRIP=false cargo build --release --target wasm32-wasip1-threads --no-default-features --features wasi --bin rumdl
 
 SHELL ["/bin/bash", "-c"]
 RUN for f in target/wasm32-wasip1-threads/release/*.wasm; do wasm-opt -o "target/$(basename $f)" --flatten --rereloop --converge -O3 "$f"; done
