@@ -5,66 +5,83 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"go/format"
-	"os"
 	"os/exec"
-	"path/filepath"
-	"strings"
 	"time"
 
-	"github.com/tetratelabs/wazero"
-	"github.com/tetratelabs/wazero/api"
+	wasm2go "github.com/wasilibs/go-rumdl/internal/wasm"
 )
 
-// instantiateHost wires up the "rumdl" host module that the guest imports to
-// run code-block formatters/linters for process spawning.
-func instantiateHost(ctx context.Context, rt wazero.Runtime) error {
-	_, err := rt.NewHostModuleBuilder("rumdl").
-		NewFunctionBuilder().
-		WithGoModuleFunction(api.GoModuleFunc(checkToolExists),
-			[]api.ValueType{api.ValueTypeI32, api.ValueTypeI32},
-			[]api.ValueType{api.ValueTypeI32}).
-		Export("check_tool_exists").
-		NewFunctionBuilder().
-		WithGoModuleFunction(api.GoModuleFunc(executeTool),
-			[]api.ValueType{
-				api.ValueTypeI32, api.ValueTypeI32, // name ptr, len
-				api.ValueTypeI32, api.ValueTypeI32, // args ptr, len
-				api.ValueTypeI32, api.ValueTypeI32, // stdin ptr, len
-				api.ValueTypeI64,                   // timeout ms (0 = none)
-				api.ValueTypeI32, api.ValueTypeI32, // out stdout ptr, len
-				api.ValueTypeI32, api.ValueTypeI32, // out stderr ptr, len
-			},
-			[]api.ValueType{api.ValueTypeI32}).
-		Export("execute_tool").
-		Instantiate(ctx)
-	if err != nil {
-		return fmt.Errorf("rumdl host: instantiating module: %w", err)
+// HostRumdl implements the "rumdl" import module (wasm2go.Xrumdl) that the
+// guest calls to run code-block formatters/linters via host process spawning.
+// The guest lacks process support under WASI, so it delegates here.
+type HostRumdl struct {
+	mem *wasm2go.HostMemory
+	m   *wasm2go.Module // set via SetModule after New, for rumdl_wasm_alloc
+}
+
+func NewHostRumdl(mem *wasm2go.HostMemory) *HostRumdl {
+	return &HostRumdl{mem: mem}
+}
+
+// SetModule wires up the module whose exported allocator returns output
+// buffers. Call after New and before the guest runs.
+func (h *HostRumdl) SetModule(m *wasm2go.Module) { h.m = m }
+
+// Xcheck_tool_exists(name_ptr, name_len) -> i32 (0/1).
+//
+//nolint:revive // method name is dictated by the wasm2go Xrumdl import interface.
+func (h *HostRumdl) Xcheck_tool_exists(namePtr, nameLen int32) int32 {
+	name := string(h.mem.Read(namePtr, nameLen))
+	if toolExists(name) {
+		return 1
 	}
-	return nil
+	return 0
 }
 
-// checkToolExists(name_ptr, name_len) -> i32 (0/1).
-func checkToolExists(_ context.Context, mod api.Module, stack []uint64) {
-	name := readString(mod, uint32(stack[0]), uint32(stack[1]))
-	stack[0] = boolToU64(toolExists(name))
+// Xexecute_tool(name, args, stdin, timeout, →stdout, →stderr) -> exit_code.
+//
+//nolint:revive // method name is dictated by the wasm2go Xrumdl import interface.
+func (h *HostRumdl) Xexecute_tool(namePtr, nameLen, argsPtr, argsLen, stdinPtr, stdinLen int32, timeoutMs int64, outStdoutPtr, outStdoutLen, outStderrPtr, outStderrLen int32) int32 {
+	name := string(h.mem.Read(namePtr, nameLen))
+	args := decodeArgs(h.readBytes(argsPtr, argsLen))
+	stdin := h.readBytes(stdinPtr, stdinLen)
+
+	stdout, stderr, exitCode := runTool(context.Background(), name, args, stdin, uint64(timeoutMs)) //nolint:gosec // guest passes a non-negative timeout as u64
+
+	h.writeOutput(stdout, outStdoutPtr, outStdoutLen)
+	h.writeOutput(stderr, outStderrPtr, outStderrLen)
+	return int32(exitCode) //nolint:gosec // exit codes are small
 }
 
-// executeTool(name, args, stdin, →stdout, →stderr) -> exit_code.
-func executeTool(ctx context.Context, mod api.Module, stack []uint64) {
-	name := readString(mod, uint32(stack[0]), uint32(stack[1]))
-	argsBuf := readBytes(mod, uint32(stack[2]), uint32(stack[3]))
-	stdin := readBytes(mod, uint32(stack[4]), uint32(stack[5]))
-	timeoutMs := stack[6]
+// readBytes copies a [ptr, len) range out of guest memory. Read returns a view
+// aliasing linear memory; copying insulates callers from a later Grow (which
+// reallocates the backing slice) or an allocator write.
+func (h *HostRumdl) readBytes(ptr, length int32) []byte {
+	if length == 0 {
+		return nil
+	}
+	out := make([]byte, length)
+	copy(out, h.mem.Read(ptr, length))
+	return out
+}
 
-	args := decodeArgs(argsBuf)
-
-	stdout, stderr, exitCode := runTool(ctx, name, args, stdin, timeoutMs)
-
-	writeOutput(ctx, mod, stdout, uint32(stack[7]), uint32(stack[8]))
-	writeOutput(ctx, mod, stderr, uint32(stack[9]), uint32(stack[10]))
-	stack[0] = uint64(uint32(exitCode))
+// writeOutput allocates guest memory via the exported allocator, copies data
+// into it, and stores the resulting pointer and length at the out-param
+// addresses. A zero-length payload writes a null pointer and zero length.
+func (h *HostRumdl) writeOutput(data []byte, outPtrAddr, outLenAddr int32) {
+	if len(data) == 0 {
+		h.mem.WriteUint32Le(outPtrAddr, 0)
+		h.mem.WriteUint32Le(outLenAddr, 0)
+		return
+	}
+	ptr := h.m.Xrumdl_wasm_alloc(int32(len(data))) //nolint:gosec // a tool-output length fits int32
+	if ptr == 0 {
+		panic("rumdl host: rumdl_wasm_alloc returned null")
+	}
+	h.mem.Write(ptr, data)
+	h.mem.WriteUint32Le(outPtrAddr, uint32(ptr))       //nolint:gosec // wasm address stored as u32
+	h.mem.WriteUint32Le(outLenAddr, uint32(len(data))) //nolint:gosec // an output length fits u32
 }
 
 // Tools we recognize to execute with `go run` to avoid user installation.
@@ -102,13 +119,8 @@ func runTool(ctx context.Context, name string, args []string, stdin []byte, time
 
 	if timeoutMs > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, time.Duration(timeoutMs)*time.Millisecond)
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(timeoutMs)*time.Millisecond) //nolint:gosec // timeout fits
 		defer cancel()
-	}
-
-	// Workaround go-prettier not supporting stdin input yet.
-	if name == "prettier" {
-		return runPrettier(ctx, args, stdin)
 	}
 
 	var cmd *exec.Cmd
@@ -135,50 +147,6 @@ func runTool(ctx context.Context, name string, args []string, stdin []byte, time
 	return outBuf.Bytes(), errBuf.Bytes(), code
 }
 
-// TODO: once a go-prettier release supports `--stdin-filepath` as a stdin
-// filter, drop this shim and the `name == "prettier"` branch above.
-func runPrettier(ctx context.Context, args []string, stdin []byte) (stdout, stderr []byte, exitCode int) {
-	ext := ".md"
-	for _, a := range args {
-		if v, ok := strings.CutPrefix(a, "--stdin-filepath="); ok {
-			if e := filepath.Ext(v); e != "" {
-				ext = e
-			}
-		}
-	}
-
-	tmp, err := os.MkdirTemp("", "rumdl-prettier-")
-	if err != nil {
-		return nil, []byte(err.Error()), 1
-	}
-	defer func() { _ = os.RemoveAll(tmp) }()
-	name := "code" + ext
-	file := filepath.Join(tmp, name)
-	if err := os.WriteFile(file, stdin, 0o600); err != nil {
-		return nil, []byte(err.Error()), 1
-	}
-
-	// go-prettier globs patterns relative to its working directory
-	cmd := exec.CommandContext(ctx, "go", "run", goRunTools["prettier"], "--write", "--no-config", "--no-editorconfig", name)
-	cmd.Dir = tmp
-	var errBuf bytes.Buffer
-	cmd.Stderr = &errBuf
-	if err := cmd.Run(); err != nil {
-		code := 1
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			code = exitErr.ExitCode()
-		}
-		return nil, errBuf.Bytes(), code
-	}
-
-	out, err := os.ReadFile(file)
-	if err != nil {
-		return nil, []byte(err.Error()), 1
-	}
-	return out, errBuf.Bytes(), 0
-}
-
 // decodeArgs parses the length-prefixed argument buffer produced by the guest:
 // each argument is a little-endian u32 length followed by that many bytes.
 func decodeArgs(buf []byte) []string {
@@ -195,54 +163,4 @@ func decodeArgs(buf []byte) []string {
 	return args
 }
 
-func readString(mod api.Module, ptr, length uint32) string {
-	return string(readBytes(mod, ptr, length))
-}
-
-func readBytes(mod api.Module, ptr, length uint32) []byte {
-	if length == 0 {
-		return nil
-	}
-	buf, ok := mod.Memory().Read(ptr, length)
-	if !ok {
-		panic("rumdl host: memory read out of bounds")
-	}
-	// Read returns a view into linear memory; copy so later writes can't alias.
-	out := make([]byte, length)
-	copy(out, buf)
-	return out
-}
-
-// writeOutput allocates guest memory via the exported allocator, copies data
-// into it, and stores the resulting pointer and length at the out-param
-// addresses. A zero-length payload writes a null pointer and zero length.
-func writeOutput(ctx context.Context, mod api.Module, data []byte, outPtrAddr, outLenAddr uint32) {
-	if len(data) == 0 {
-		writeU32(mod, outPtrAddr, 0)
-		writeU32(mod, outLenAddr, 0)
-		return
-	}
-	res, err := mod.ExportedFunction("rumdl_wasm_alloc").Call(ctx, uint64(len(data)))
-	if err != nil {
-		panic(err)
-	}
-	ptr := uint32(res[0])
-	if !mod.Memory().Write(ptr, data) {
-		panic("rumdl host: memory write out of bounds")
-	}
-	writeU32(mod, outPtrAddr, ptr)
-	writeU32(mod, outLenAddr, uint32(len(data)))
-}
-
-func writeU32(mod api.Module, addr, val uint32) {
-	if !mod.Memory().WriteUint32Le(addr, val) {
-		panic("rumdl host: out-param write out of bounds")
-	}
-}
-
-func boolToU64(b bool) uint64 {
-	if b {
-		return 1
-	}
-	return 0
-}
+var _ wasm2go.Xrumdl = (*HostRumdl)(nil)

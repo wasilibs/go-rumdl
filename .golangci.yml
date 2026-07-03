@@ -1,4 +1,8 @@
 version: "2"
+run:
+  # Code generated from WASM too huge to analyze so we use a build tag to skip it.
+  build-tags:
+    - codeanalysis
 linters:
   enable:
     - asasalint
@@ -105,6 +109,8 @@ linters:
   exclusions:
     presets:
       - comments
+    paths:
+      - internal/wasm/.*\.wasm\.stub\.go
     rules:
       - linters:
           - errcheck
@@ -123,6 +129,9 @@ formatters:
   enable:
     - gci
     - gofumpt
+  exclusions:
+    paths:
+      - internal/wasm/.*\.wasm\.stub\.go
   settings:
     gci:
       sections:
