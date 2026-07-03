@@ -2,17 +2,17 @@
   "folders": [
     {
       "name": "/",
-      "path": "."
-    }
+      "path": ".",
+    },
   ],
   "extensions": {
-    "recommendations": ["esbenp.prettier-vscode"]
+    "recommendations": ["esbenp.prettier-vscode"],
   },
   "settings": {
     "editor.tabSize": 2,
     "[github-actions-workflow]": {
       "editor.formatOnSave": true,
-      "editor.defaultFormatter": "esbenp.prettier-vscode"
+      "editor.defaultFormatter": "esbenp.prettier-vscode",
     },
     "go.lintFlags": ["--fix"],
     "go.lintOnSave": "package",
@@ -23,11 +23,11 @@
     },
     "[markdown]": {
       "editor.formatOnSave": true,
-      "editor.defaultFormatter": "esbenp.prettier-vscode"
+      "editor.defaultFormatter": "esbenp.prettier-vscode",
     },
     "[yaml]": {
       "editor.formatOnSave": true,
-      "editor.defaultFormatter": "esbenp.prettier-vscode"
-    }
-  }
+      "editor.defaultFormatter": "esbenp.prettier-vscode",
+    },
+  },
 }
