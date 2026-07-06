@@ -14,7 +14,7 @@ import "sync"
 
 type Module struct{}
 
-func New(_ Xwasi_snapshot_preview1, _ Xrumdl, _ Xwasi, _ Xenv) *Module { return &Module{} }
+func New(_ Xenv, _ Xwasi_snapshot_preview1, _ Xrumdl, _ Xwasi) *Module { return &Module{} }
 
 func (*Module) X_start()                        {}
 func (*Module) Xmalloc(int32) int32             { return 0 }

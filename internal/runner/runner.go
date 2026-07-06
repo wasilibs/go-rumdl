@@ -27,7 +27,7 @@ func Run(name string, args []string, stdin io.Reader, stdout io.Writer, stderr i
 	// host cwd exactly as the native binary does (see wasm2go.SetCwd). The
 	// module's exported allocator is wired into the rumdl host afterward so it
 	// can return tool output into guest memory.
-	m := wasm2go.New(wasi, rumdl, threads, env)
+	m := wasm2go.New(env, wasi, rumdl, threads)
 	rumdl.SetModule(m)
 	wasm2go.SetCwd(m, mem, cwdAbs)
 	return wasm2go.RunModule(m)
