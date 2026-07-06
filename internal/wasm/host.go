@@ -163,7 +163,7 @@ func NewHostThreads(p1 Xwasi_snapshot_preview1, rumdl Xrumdl, env Xenv) *HostThr
 
 func (t *HostThreads) Xthread_spawn_6s4jie(startArg int32) int32 {
 	tid := t.nextTID.Add(1)
-	child := New(t.env, t.p1, t.rumdl, t)
+	child := New(t.rumdl, t.p1, t, t.env)
 	go child.Xwasi_thread_start(tid, startArg)
 	return tid
 }

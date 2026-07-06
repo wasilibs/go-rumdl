@@ -14,12 +14,12 @@ RUN git apply /patch.txt
 
 # Export malloc and __wasilibc_cwd so the host can point wasi-libc's working
 # directory at the process cwd (see internal/wasm/host.go SetCwd).
-ENV RUSTFLAGS="-C link-arg=--export=__wasilibc_cwd -C link-arg=--export=malloc"
+ENV RUSTFLAGS="-C link-arg=--export=__wasilibc_cwd -C link-arg=--export=malloc -C opt-level=s"
 # rumdl's release profile sets strip = true, which drops the wasm metadata
 RUN cargo update && CARGO_PROFILE_RELEASE_STRIP=false cargo build --release --target wasm32-wasip1-threads --no-default-features --features wasi --bin rumdl
 
 SHELL ["/bin/bash", "-c"]
-RUN for f in target/wasm32-wasip1-threads/release/*.wasm; do wasm-opt -o "target/$(basename $f)" --flatten --rereloop --converge -O3 "$f"; done
+RUN for f in target/wasm32-wasip1-threads/release/*.wasm; do wasm-opt -o "target/$(basename $f)" --flatten --rereloop --converge -Os "$f"; done
 
 RUN for f in target/*.wasm; do \
       pages=$(wasm-objdump -x "$f" | grep -oE 'initial=[0-9]+' | head -1 | grep -oE '[0-9]+'); \
