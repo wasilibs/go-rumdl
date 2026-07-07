@@ -2,7 +2,7 @@ package runner
 
 const (
 	// renovate: github.com/wasilibs/go-prettier
-	verGoPrettier = "v3.9.1"
+	verGoPrettier = "v3.9.4"
 	// renovate: github.com/wasilibs/go-shellcheck
 	verGoShellcheck = "v0.11.1"
 	// renovate: github.com/golang/tools
