@@ -95,7 +95,7 @@ func RunModule(m *Module) (code int) {
 // exported global holds the address of the char* pointer variable, so this
 // writes a fresh string buffer and stores its address into that variable.
 func SetCwd(m *Module, mem *HostMemory, cwdAbs string) {
-	guest := filepath.ToSlash(strings.TrimPrefix(cwdAbs, filepath.VolumeName(cwdAbs)))
+	guest := hostPathToGuestPath(cwdAbs)
 	buf := append([]byte(guest), 0)
 	strAddr := m.Xmalloc(int32(len(buf))) //nolint:gosec // a cwd path length always fits int32
 	if strAddr == 0 {
@@ -104,6 +104,30 @@ func SetCwd(m *Module, mem *HostMemory, cwdAbs string) {
 	mem.Write(strAddr, buf)
 	cwdVarAddr := *m.X__wasilibc_cwd()
 	mem.WriteUint32Le(cwdVarAddr, uint32(strAddr)) //nolint:gosec // storing a wasm address as the u32 cwd pointer
+}
+
+func hostPathToGuestPath(hostPath string) string {
+	volume := filepath.VolumeName(hostPath)
+	if volume != "" {
+		guestVolume := filepath.ToSlash(volume)
+		if strings.HasPrefix(guestVolume, "//") {
+			return filepath.ToSlash(hostPath)
+		}
+		rest := strings.TrimLeft(filepath.ToSlash(strings.TrimPrefix(hostPath, volume)), "/")
+		if rest == "" {
+			return "/" + guestVolume + "/"
+		}
+		return "/" + guestVolume + "/" + rest
+	}
+
+	guest := filepath.ToSlash(hostPath)
+	if guest == "" {
+		return "/"
+	}
+	if !strings.HasPrefix(guest, "/") {
+		guest = "/" + guest
+	}
+	return guest
 }
 
 // HostMemory is a growable shared linear memory for wasm2go.
@@ -248,7 +272,25 @@ func (w *HostWASI) hostPath(dirfd, ptr, plen int32) (string, int32) {
 		return "", errnoBadf
 	}
 	rel := string(w.mem.Read(ptr, plen))
-	return filepath.Join(e.path, filepath.FromSlash(rel)), errnoSuccess
+	return guestPathToHostPath(e.path, rel), errnoSuccess
+}
+
+func guestPathToHostPath(base, guestPath string) string {
+	if filepath.Separator == '\\' && len(guestPath) >= len("/C:") && guestPath[0] == '/' && isWindowsDriveLetter(guestPath[1]) && guestPath[2] == ':' {
+		if len(guestPath) == len("/C:") || guestPath[3] == '/' || guestPath[3] == '\\' {
+			guestPath = guestPath[1:]
+		}
+	}
+
+	hostPath := filepath.FromSlash(guestPath)
+	if filepath.IsAbs(hostPath) {
+		return filepath.Clean(hostPath)
+	}
+	return filepath.Join(base, hostPath)
+}
+
+func isWindowsDriveLetter(b byte) bool {
+	return ('A' <= b && b <= 'Z') || ('a' <= b && b <= 'z')
 }
 
 func errnoFromErr(err error) int32 {
