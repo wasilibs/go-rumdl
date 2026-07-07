@@ -7,6 +7,7 @@ import (
 	"errors"
 	"go/format"
 	"os/exec"
+	"strings"
 	"time"
 
 	wasm2go "github.com/wasilibs/go-rumdl/internal/wasm"
@@ -95,6 +96,7 @@ var goRunTools = map[string]string{
 
 // toolExists reports whether a tool can be run.
 func toolExists(name string) bool {
+	name = normalizeToolName(name)
 	if name == "gofmt" {
 		return true
 	}
@@ -108,6 +110,7 @@ func toolExists(name string) bool {
 
 // runTool runs a tool over stdin, returning its stdout, stderr, and exit code.
 func runTool(ctx context.Context, name string, args []string, stdin []byte, timeoutMs uint64) (stdout, stderr []byte, exitCode int) {
+	name = normalizeToolName(name)
 	if name == "gofmt" {
 		// We can always run this in-process.
 		out, err := format.Source(stdin)
@@ -145,6 +148,17 @@ func runTool(ctx context.Context, name string, args []string, stdin []byte, time
 		}
 	}
 	return outBuf.Bytes(), errBuf.Bytes(), code
+}
+
+func normalizeToolName(name string) string {
+	base, _, ok := strings.Cut(name, ":")
+	if !ok {
+		return name
+	}
+	if _, ok := goRunTools[base]; ok {
+		return base
+	}
+	return name
 }
 
 // decodeArgs parses the length-prefixed argument buffer produced by the guest:
