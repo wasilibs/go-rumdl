@@ -6,7 +6,7 @@ const (
 	// renovate: github.com/wasilibs/go-shellcheck
 	verGoShellcheck = "v0.11.1"
 	// renovate: github.com/golang/tools
-	verGoTools = "v0.47.0"
+	verGoTools = "v0.48.0"
 	// renovate: github.com/mvdan/sh
 	verShfmt = "v3.13.1"
 	// renovate: github.com/google/yamlfmt
