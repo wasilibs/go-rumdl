@@ -149,7 +149,7 @@ func runTool(ctx context.Context, name string, args []string, stdin []byte, time
 	}
 	if code == 0 {
 		if _, ok := goRunTools[name]; ok {
-		errBuf = *bytes.NewBuffer(stripGoRunBootstrapStderr(errBuf.Bytes()))
+			errBuf = *bytes.NewBuffer(stripGoRunBootstrapStderr(errBuf.Bytes()))
 		}
 	}
 	return outBuf.Bytes(), errBuf.Bytes(), code
