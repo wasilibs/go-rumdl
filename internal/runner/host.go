@@ -147,6 +147,11 @@ func runTool(ctx context.Context, name string, args []string, stdin []byte, time
 			return nil, []byte(err.Error()), 1
 		}
 	}
+	if code == 0 {
+		if _, ok := goRunTools[name]; ok {
+			errBuf = *bytes.NewBuffer(stripGoRunBootstrapStderr(errBuf.Bytes()))
+		}
+	}
 	return outBuf.Bytes(), errBuf.Bytes(), code
 }
 
@@ -175,6 +180,23 @@ func decodeArgs(buf []byte) []string {
 		buf = buf[n:]
 	}
 	return args
+}
+
+func stripGoRunBootstrapStderr(stderr []byte) []byte {
+	if len(stderr) == 0 {
+		return nil
+	}
+
+	var filtered bytes.Buffer
+	for _, line := range bytes.SplitAfter(stderr, []byte("\n")) {
+		trimmed := bytes.TrimRight(line, "\r\n")
+		if bytes.HasPrefix(trimmed, []byte("go: downloading ")) {
+			continue
+		}
+		filtered.Write(line)
+	}
+
+	return bytes.TrimLeft(filtered.Bytes(), "\r\n")
 }
 
 var _ wasm2go.Xrumdl = (*HostRumdl)(nil)
