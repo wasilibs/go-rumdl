@@ -32,3 +32,11 @@ func TestStripGoRunBootstrapStderrPreservesRealStderr(t *testing.T) {
 		t.Fatalf("stripGoRunBootstrapStderr() = %q, want %q", got, want)
 	}
 }
+
+func TestStripGoRunBootstrapStderrPreservesDiagnosticsWithWindowsLineEndings(t *testing.T) {
+	stderr := []byte("go: downloading github.com/wasilibs/go-shellcheck v0.11.1\r\ngo: downloading github.com/tetratelabs/wazero v1.9.0\r\nshellcheck diagnostic\r\n")
+
+	if got, want := stripGoRunBootstrapStderr(stderr), []byte("shellcheck diagnostic\r\n"); !bytes.Equal(got, want) {
+		t.Fatalf("stripGoRunBootstrapStderr() = %q, want %q", got, want)
+	}
+}
