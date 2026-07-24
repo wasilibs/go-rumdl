@@ -1,5 +1,6 @@
 [code-block-tools]
 enabled = true
+timeout = 300000
 
 [code-block-tools.languages.go]
 format = ["gofmt"]
