@@ -2,4 +2,4 @@
 
 package wasm2go
 
-const initialPages = 31
+const initialPages = 32

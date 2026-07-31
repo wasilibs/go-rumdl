@@ -1,7 +1,7 @@
 # Heading
 
-* one
-* two
-* three
+*  one
+*  two
+*  three
 
 Trailing text after extra blank lines.
