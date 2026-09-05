@@ -26,7 +26,7 @@ RUN for f in target/*.wasm; do \
       printf '// Code generated from %s. DO NOT EDIT.\n\npackage wasm2go\n\nconst initialPages = %s\n' "$(basename "$f")" "$pages" > "${f%.wasm}.memory.go"; \
     done
 
-FROM golang:1.26-trixie
+FROM golang:1.27-trixie
 
 COPY --from=wasm /workspace/target/*.wasm /build/
 COPY --from=wasm /workspace/target/*.memory.go /build/
